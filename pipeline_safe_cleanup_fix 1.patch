@@ -1,0 +1,93 @@
+diff --git a/pipeline_safe_cleanup.py b/pipeline_safe_cleanup.py
+index d1bbf40..aaa24b5 100644
+--- a/pipeline_safe_cleanup.py
++++ b/pipeline_safe_cleanup.py
+@@ -87,6 +87,19 @@ def deduplicate_by_keys(
+     return unique, duplicates
+ 
+ 
++FIELD_META_KEEP = ["key", "selector", "tag", "input_type", "role", "label",
++                   "normalized_label", "visible", "hidden", "required",
++                   "readonly", "field_type", "value", "dynamic"]
++
++
++def slim_field_map(field_map: Dict[str, Any]) -> Dict[str, Any]:
++    """Slim a {field_name: field_meta} map to the field keys the pipeline reads."""
++    return {
++        k: ({f: v[f] for f in FIELD_META_KEEP if f in v} if isinstance(v, dict) else v)
++        for k, v in field_map.items()
++    }
++
++
+ def slim_dom_metadata_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+     """
+     Slim down a dom_metadata entry to only what's needed by the pipeline.
+@@ -142,22 +155,13 @@ def slim_dom_metadata_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+         if "dom_metadata" in entry and entry["dom_metadata"]:
+             nested_dm = entry["dom_metadata"]
+             if isinstance(nested_dm, dict):
+-                # Slim each nested entry to essential fields only
+-                slimmed_nested = {}
+-                for k, v in nested_dm.items():
+-                    if isinstance(v, dict):
+-                        slimmed_nested[k] = {
+-                            field: v[field] for field in 
+-                            ["key", "selector", "tag", "input_type", "role", "label",
+-                             "normalized_label", "visible", "hidden", "required", 
+-                             "readonly", "field_type", "value", "dynamic"]
+-                            if field in v
+-                        }
+-                    else:
+-                        slimmed_nested[k] = v
+-                slimmed["dom_metadata"] = slimmed_nested
+-        
++                slimmed["dom_metadata"] = slim_field_map(nested_dm)
++
+         return slimmed
++    elif entry and all(isinstance(v, dict) for v in entry.values()):
++        # Recorder's top-level dom_metadata: one {field_name: field_meta} map per step.
++        # raw_log_to_steps_flow falls back to it when learn_enriched lacks a page.
++        return slim_field_map(entry)
+     else:
+         # This is a field registry entry (top-level dom_metadata)
+         # These are usually small, keep essential fields only
+@@ -173,20 +177,14 @@ def deduplicate_nested_across_snapshots(
+     snapshots: List[Dict[str, Any]]
+ ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+     """
+-    Deduplicate display_fields across ALL snapshots.
+-    
+-    IMPORTANT: Messages and popups are NOT deduplicated across snapshots
+-    because generate_screens_json.py processes each snapshot step-by-step
+-    and needs to see messages/popups per step.
+-    
+-    Only display_fields are deduplicated (they're metadata about fields,
+-    not step-specific state).
+-    
++    Deduplicate display_fields, messages and popups WITHIN each snapshot.
++
++    Nothing is deduplicated ACROSS snapshots: raw_log_to_steps_flow.py reads each
++    snapshot's display_fields as that step's "Visible text" (Inspect LLM context),
++    and generate_screens_json.py reads messages/popups per step.
++
+     Returns slimmed snapshots and stats.
+     """
+-    # Global dedup trackers - ONLY for display_fields
+-    seen_display: Set[str] = set()
+-    
+     stats = {
+         "display_fields_removed": 0,
+         "messages_removed": 0,  # Will stay 0 - no longer deduping
+@@ -202,10 +200,10 @@ def deduplicate_nested_across_snapshots(
+         
+         new_snap = dict(snap)  # shallow copy
+         
+-        # Process display_fields - keep only new ones across all snapshots
+-        # This is safe because display_fields are field metadata, not step state
++        # display_fields are per-step visible text: dedup within this snapshot only
+         df = snap.get("display_fields") or []
+         if df:
++            seen_display: Set[str] = set()
+             unique_df = []
+             for field in df:
+                 if not isinstance(field, dict):
